@@ -1,0 +1,11 @@
+[package]
+name = "epics-tools"
+version = "0.1.0"
+authors = [ "Ricardo Cárdenes <ricardo.cardenes@noirlab.edu>" ]
+edition = "2021"
+
+[dependencies]
+clap = "4.3"
+epics-ca = "0"
+futures = "0"
+tokio = { version = "1", features = [ "full" ] }
