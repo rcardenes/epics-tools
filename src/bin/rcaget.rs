@@ -10,11 +10,12 @@ use epics_ca::{
     types::{EpicsTimeStamp, FieldId, Value},
     Channel, Context,
 };
+use futures::future::join_all;
 
 use epics_tools::config::DEFAULT_WAIT_TIME;
 use epics_tools::{UnifiedError, UnifiedResult};
 use futures::TryFutureExt;
-use tokio::{select, time::sleep};
+use tokio::{select, task::JoinSet, time::sleep};
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -24,7 +25,7 @@ struct Config {
     names: Vec<String>,
     wait_time: f32,
     // Flags
-    _asynchronous: bool,
+    asynchronous: bool,
     terse: bool,
     wide: bool,
 }
@@ -200,7 +201,7 @@ async fn get_arguments() -> UnifiedResult<Config> {
     Ok(Config {
         names,
         wait_time,
-        _asynchronous: matches.get_flag("asget"),
+        asynchronous: matches.get_flag("asget"),
         terse: matches.get_flag("terse"),
         wide: matches.get_flag("wide"),
     })
@@ -234,7 +235,7 @@ async fn wait_connect(channels: &mut [Channel], timeout: u64) -> UnifiedResult<(
     tokio::pin!(sleeper);
 
     select! {
-        _ = futures::future::join_all(connected) => Ok(()),
+        _ = join_all(connected) => Ok(()),
         () = &mut sleeper =>
             Err(UnifiedError::Misc("Channel connect timed out: some PV(s) not found.".into())),
     }
@@ -272,37 +273,35 @@ macro_rules! get_array {
     };
 }
 
-async fn grab_info(_config: &Config, channels: Vec<Channel>) -> UnifiedResult<Vec<Info>> {
-    let mut ret = vec![];
+async fn grab_info(channel: Channel) -> UnifiedResult<Info> {
+    let count = channel.element_count().unwrap();
+    let name = channel.name().to_string_lossy().to_string();
+    let tp = channel.field_type().unwrap();
 
-    for ch in channels {
-        let count = ch.element_count().unwrap();
-        ret.push(Info::new(
-            ch.name().to_string_lossy().into(),
-            count,
-            if count == 1 {
-                match ch.field_type().unwrap() {
-                    FieldId::Short => get_value!(ch, i16, RawValue::Short),
-                    FieldId::Float => get_value!(ch, f32, RawValue::Float),
-                    FieldId::Enum => get_value!(ch, EpicsEnum, RawValue::Enum),
-                    FieldId::Char => get_value!(ch, u8, RawValue::Char),
-                    FieldId::Long => get_value!(ch, i32, RawValue::Long),
-                    FieldId::Double => get_value!(ch, f64, RawValue::Double),
-                    FieldId::String => get_value!(ch, EpicsString, RawValue::String),
-                }
-            } else {
-                match ch.field_type().unwrap() {
-                    FieldId::Short => get_array!(ch, [i16], RawValue::ShortArray),
-                    FieldId::Float => get_array!(ch, [f32], RawValue::FloatArray),
-                    FieldId::Long => get_array!(ch, [i32], RawValue::LongArray),
-                    FieldId::Double => get_array!(ch, [f64], RawValue::DoubleArray),
-                    FieldId::String => get_array!(ch, [EpicsString], RawValue::StringArray),
-                    _ => unimplemented!(),
-                }
-            },
-        ));
-    }
-    Ok(ret)
+    Ok(Info::new(
+        name,
+        count,
+        if count == 1 {
+            match tp {
+                FieldId::Short => get_value!(channel, i16, RawValue::Short),
+                FieldId::Float => get_value!(channel, f32, RawValue::Float),
+                FieldId::Enum => get_value!(channel, EpicsEnum, RawValue::Enum),
+                FieldId::Char => get_value!(channel, u8, RawValue::Char),
+                FieldId::Long => get_value!(channel, i32, RawValue::Long),
+                FieldId::Double => get_value!(channel, f64, RawValue::Double),
+                FieldId::String => get_value!(channel, EpicsString, RawValue::String),
+            }
+        } else {
+            match tp {
+                FieldId::Short => get_array!(channel, [i16], RawValue::ShortArray),
+                FieldId::Float => get_array!(channel, [f32], RawValue::FloatArray),
+                FieldId::Long => get_array!(channel, [i32], RawValue::LongArray),
+                FieldId::Double => get_array!(channel, [f64], RawValue::DoubleArray),
+                FieldId::String => get_array!(channel, [EpicsString], RawValue::StringArray),
+                _ => unimplemented!(),
+            }
+        },
+    ))
 }
 
 fn print_formatted(chan_info: &Info, config: &Config) {
@@ -333,17 +332,54 @@ fn print_formatted(chan_info: &Info, config: &Config) {
     println!("{}", components.join(" "));
 }
 
+async fn collect_sync(mut channels: Vec<Channel>, timeout: u64) -> UnifiedResult<Vec<Info>> {
+    wait_connect(&mut channels, timeout).await?;
+
+    let mut result = vec![];
+    for ch in channels {
+        result.push(grab_info(ch).await?);
+    }
+    Ok(result)
+}
+
+async fn collect_async(channels: Vec<Channel>, timeout: u64) -> UnifiedResult<Vec<Info>> {
+    let mut set = JoinSet::new();
+
+    for mut ch in channels {
+        set.spawn(async move {
+            let sleeper = sleep(Duration::from_millis(timeout));
+            tokio::pin!(sleeper);
+
+            select! {
+                () = ch.connected() => Ok(()),
+                () = &mut sleeper =>
+                    Err(UnifiedError::Misc("Channel connect timed out: some PV(s) not found.".into())),
+            }?;
+            grab_info(ch).await
+        });
+    }
+
+    let mut result = vec![];
+
+    while let Some(task_res) = set.join_next().await {
+        if let Ok(res) = task_res {
+            result.push(res?);
+        }
+    }
+
+    Ok(result)
+}
+
 async fn run(config: Config) -> UnifiedResult<()> {
     let timeout = (config.wait_time * 1000.0) as u64;
     let ctx = Context::new().map_err(UnifiedError::CaError)?;
-    let mut channels = get_channels(&ctx, &config)?;
-    // if config.asynchronous {
-    //     print_async(config, channels);
-    // } else {
-    //     print_sync(config, channels);
-    // }
-    wait_connect(&mut channels, timeout).await?;
-    let info = grab_info(&config, channels).await?;
+    let channels = get_channels(&ctx, &config)?;
+
+    let info = if config.asynchronous {
+        collect_async(channels, timeout).await?
+    } else {
+        collect_sync(channels, timeout).await?
+    };
 
     for ch in info {
         print_formatted(&ch, &config);
