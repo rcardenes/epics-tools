@@ -30,15 +30,6 @@ struct Config {
     wide: bool,
 }
 
-//  Taken from the EPICS CA Reference
-// DBR_CHAR 	dbr_char_t 	8 bit character
-// DBR_SHORT 	dbr_short_t 	16 bit integer
-// DBR_ENUM 	dbr_enum_t 	16 bit unsigned integer
-// DBR_LONG 	dbr_long_t 	32 bit signed integer
-// DBR_FLOAT 	dbr_float_t 	32 bit IEEE floating point
-// DBR_DOUBLE 	dbr_double_t 	64 bit IEEE floating point
-// DBR_STRING 	dbr_string_t 	40 character string
-
 #[derive(Debug)]
 enum RawValue {
     // Scalar
@@ -82,20 +73,6 @@ impl RawValue {
             DoubleArray,
             StringArray
         )
-        // match self {
-        //     // RawValue::Char(val) => val.stamp,
-        //     RawValue::Short(val) => val.stamp,
-        //     RawValue::Long(val) => val.stamp,
-        //     RawValue::Float(val) => val.stamp,
-        //     RawValue::Double(val) => val.stamp,
-        //     RawValue::Enum(val) => val.stamp,
-        //     RawValue::String(val) => val.stamp,
-        //     RawValue::ShortArray(val) => val.stamp,
-        //     RawValue::LongArray(val) => val.stamp,
-        //     RawValue::FloatArray(val) => val.stamp,
-        //     RawValue::DoubleArray(val) => val.stamp,
-        //     RawValue::StringArray(val) => val.stamp,
-        // }
     }
 
     fn format_scalar(&self) -> String {
