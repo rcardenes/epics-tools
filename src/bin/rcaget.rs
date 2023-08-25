@@ -1,19 +1,22 @@
+use epics_tools::{wait_connect, get_channels};
 use std::ffi::CStr;
 use std::time::Duration;
-use std::{ffi::CString, fmt::Debug};
 
-use chrono::{DateTime, Local};
 use clap::{arg, Command};
 use epics_ca::types::{EpicsEnum, EpicsString};
 use epics_ca::{
     request,
-    types::{EpicsTimeStamp, FieldId, Value},
+    types::{FieldId, Value},
     Channel, Context,
 };
-use futures::future::join_all;
+use epics_tools::types::RawValue;
+use epics_tools::{
+    config::{DEFAULT_WAIT_TIME, wait_time_in_range},
+    types::Info,
+    UnifiedError,
+    UnifiedResult
+};
 
-use epics_tools::config::DEFAULT_WAIT_TIME;
-use epics_tools::{UnifiedError, UnifiedResult};
 use futures::TryFutureExt;
 use tokio::{select, task::JoinSet, time::sleep};
 
@@ -28,128 +31,6 @@ struct Config {
     asynchronous: bool,
     terse: bool,
     wide: bool,
-}
-
-#[derive(Debug)]
-enum RawValue {
-    // Scalar
-    Char(request::Time<u8>),
-    Short(request::Time<i16>),
-    Long(request::Time<i32>),
-    Enum(request::Time<EpicsEnum>),
-    Float(request::Time<f32>),
-    Double(request::Time<f64>),
-    String(request::Time<EpicsString>),
-    // Arrays
-    ShortArray(Box<request::Time<[i16]>>),
-    LongArray(Box<request::Time<[i32]>>),
-    FloatArray(Box<request::Time<[f32]>>),
-    DoubleArray(Box<request::Time<[f64]>>),
-    StringArray(Box<request::Time<[EpicsString]>>),
-}
-
-macro_rules! impl_get_stamp {
-    ($op:ident, $( $name:ident ),+) => {
-        match $op {
-            $(RawValue::$name(val) => val.stamp,)+
-        }
-    };
-}
-
-impl RawValue {
-    fn get_stamp(&self) -> EpicsTimeStamp {
-        impl_get_stamp!(
-            self,
-            Char,
-            Short,
-            Long,
-            Float,
-            Double,
-            Enum,
-            String,
-            ShortArray,
-            LongArray,
-            FloatArray,
-            DoubleArray,
-            StringArray
-        )
-    }
-
-    fn format_scalar(&self) -> String {
-        match self {
-            RawValue::Short(val) => format!("{}", val.value),
-            RawValue::Long(val) => format!("{}", val.value),
-            RawValue::Float(val) => format!("{:.5}", val.value),
-            RawValue::Double(val) => format!("{:.5}", val.value),
-            RawValue::Enum(val) => format!("{}", val.value.0),
-            RawValue::String(val) => val.value.to_string_lossy().to_string(),
-            _ => format!("<formatting not implemented yet for {self:#?}>"),
-        }
-    }
-
-    fn format_array(&self, padding: usize) -> String {
-        fn format_array<T>(padding: usize, data: &request::Time<[T]>) -> String
-        where
-            T: ToString,
-            [T]: epics_ca::types::Value,
-        {
-            let mut rest: Vec<_> = data.value.iter().map(|d| d.to_string()).collect();
-            for _ in 0..(padding - rest.len()) {
-                rest.push("0".into());
-            }
-            rest.join(" ").to_string()
-        }
-
-        match self {
-            RawValue::LongArray(val) => format_array(padding, val),
-            _ => format!("<formatting not implemented yet for {self:#?}>"),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Info {
-    name: String,
-    elements: usize,
-    value: RawValue,
-}
-
-impl Info {
-    pub fn new(name: String, elements: usize, value: RawValue) -> Self {
-        Info {
-            name,
-            elements,
-            value,
-        }
-    }
-
-    pub fn is_scalar(&self) -> bool {
-        self.elements == 1
-    }
-
-    fn format_scalar(&self) -> String {
-        self.value.format_scalar()
-    }
-
-    fn format_array(&self, count: usize) -> String {
-        self.value.format_array(count)
-    }
-
-    fn format_stamp(&self) -> String {
-        let stamp: DateTime<Local> = self.value.get_stamp().to_system().into();
-        format!("{}", stamp.format("%F %T%.6f"))
-    }
-}
-
-fn wait_time_in_range(s: &str) -> Result<f32, String> {
-    let time: f32 = s
-        .parse()
-        .map_err(|_| "The wait time must be a real number".to_string())?;
-    if time > 0.0 {
-        Ok(time)
-    } else {
-        Err("Wait time must be a positive value".into())
-    }
 }
 
 async fn get_arguments() -> UnifiedResult<Config> {
@@ -182,40 +63,6 @@ async fn get_arguments() -> UnifiedResult<Config> {
         terse: matches.get_flag("terse"),
         wide: matches.get_flag("wide"),
     })
-}
-
-fn get_channels(ctx: &Context, config: &Config) -> UnifiedResult<Vec<Channel>> {
-    let mut errors = vec![];
-
-    let channels: Vec<_> = config
-        .names
-        .iter()
-        .map(|name| match CString::new(name.as_str()) {
-            Ok(pvname) => Channel::new(ctx, &pvname).map_err(UnifiedError::CaError),
-            Err(error) => Err(UnifiedError::Misc(format!("{error}"))),
-        })
-        .filter_map(|r| r.map_err(|e| errors.push(e)).ok())
-        .collect();
-
-    Ok(channels)
-}
-
-async fn wait_connect(channels: &mut [Channel], timeout: u64) -> UnifiedResult<()> {
-    let connected: Vec<_> = channels.iter_mut().map(|ch| ch.connected()).collect();
-    let sleeper = sleep(Duration::from_millis(timeout));
-
-    /*
-       This is a bit of Rust's async black magic (pinned vs. unpinned data), having to
-       do with data migration across threads. It makes sense once you read about it,
-       though.
-    */
-    tokio::pin!(sleeper);
-
-    select! {
-        _ = join_all(connected) => Ok(()),
-        () = &mut sleeper =>
-            Err(UnifiedError::Misc("Channel connect timed out: some PV(s) not found.".into())),
-    }
 }
 
 pub async fn connect<V: Value + ?Sized>(
@@ -350,7 +197,7 @@ async fn collect_async(channels: Vec<Channel>, timeout: u64) -> UnifiedResult<Ve
 async fn run(config: Config) -> UnifiedResult<()> {
     let timeout = (config.wait_time * 1000.0) as u64;
     let ctx = Context::new().map_err(UnifiedError::CaError)?;
-    let channels = get_channels(&ctx, &config)?;
+    let channels = get_channels(&ctx, &config.names)?;
 
     let info = if config.asynchronous {
         collect_async(channels, timeout).await?
