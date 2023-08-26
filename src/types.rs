@@ -60,7 +60,7 @@ impl RawValue {
     }
 
     pub fn format_array(&self, padding: usize) -> String {
-        fn format_array<T>(padding: usize, data: &request::Time<[T]>) -> String
+        fn format_array_inner<T>(padding: usize, data: &request::Time<[T]>) -> String
         where
             T: ToString,
             [T]: epics_ca::types::Value,
@@ -73,7 +73,7 @@ impl RawValue {
         }
 
         match self {
-            RawValue::LongArray(val) => format_array(padding, val),
+            RawValue::LongArray(val) => format_array_inner(padding, val),
             _ => format!("<formatting not implemented yet for {self:#?}>"),
         }
     }
@@ -105,6 +105,10 @@ impl Info {
 
     pub fn format_array(&self, count: usize) -> String {
         self.value.format_array(count)
+    }
+
+    pub fn format_array_full(&self) -> String {
+        self.format_array(self.elements)
     }
 
     pub fn format_stamp(&self) -> String {
